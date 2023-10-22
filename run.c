@@ -2,6 +2,8 @@
    The Llama 2 Everywhere @trholding (Vulcan) fork   */
    
 
+#define memcpy __builtin_memcpy
+
 // ----------------------------------------------------------------------------
 // L2E Humanoid : Linux Kernel Support Directives
 // 
@@ -190,10 +192,15 @@ typedef struct {
 typedef struct {
     Config config; // the hyperparameters of the architecture (the blueprint)
     TransformerWeights weights; // the weights of the model
+    TransformerWeights dweights;
     RunState state; // buffers for the "wave" of activations in the forward pass
+    RunState dstate;
     // some more state needed to properly clean up the memory mapping (sigh)
     int fd; // file descriptor for memory mapping
     float* data; // memory mapped data pointer
+    float* ddata;
+    float* weights_ptr;
+    float* dweights_ptr;
     ssize_t file_size; // size of the checkpoint file in bytes
 } Transformer;
 
@@ -219,6 +226,22 @@ void malloc_run_state(RunState* s, Config* p) {
         fprintf(stderr, "malloc failed!\n");
         exit(EXIT_FAILURE);
     }
+}
+
+void zero_run_state(RunState* s, Config* p) {
+    // we calloc instead of malloc to keep valgrind happy
+    memset(s->x, 0, p->dim * sizeof(float));
+    memset(s->xb, 0, p->dim * sizeof(float));
+    memset(s->xb2, 0, p->dim * sizeof(float));
+    memset(s->hb, 0,p->hidden_dim * sizeof(float));
+    memset(s->hb2, 0,p->hidden_dim * sizeof(float));
+    memset(s->q, 0,p->dim * sizeof(float));
+    memset(s->k, 0,p->dim * sizeof(float));
+    memset(s->v, 0,p->dim * sizeof(float));
+    memset(s->att, 0,p->n_heads * p->seq_len * sizeof(float));
+    memset(s->logits, 0,p->vocab_size * sizeof(float));
+    memset(s->key_cache, 0,p->n_layers * p->seq_len * p->dim * sizeof(float));
+    memset(s->value_cache, 0,p->n_layers * p->seq_len * p->dim * sizeof(float));
 }
 
 void free_run_state(RunState* s) {
@@ -283,8 +306,9 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
     memory_map_weights(weights, config, weights_ptr, shared_weights);
 }
 #else
-void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weights,
-                     int* fd, float** data, ssize_t* file_size) {
+void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weights, TransformerWeights* dweights,
+		     float* weights_ptr, float* dweights_ptr,
+                     int* fd, float** data, float** ddata, ssize_t* file_size) {
     FILE *file = fopen(checkpoint, "rb");
     if (!file) { fprintf(stderr, "Couldn't open file %s\n", checkpoint); exit(EXIT_FAILURE); }
     // read in the config header
@@ -299,16 +323,22 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
     // memory map the Transformer weights into the data pointer
     *fd = open(checkpoint, O_RDONLY); // open in read only mode
     if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
-    *data = mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
-    if (*data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
-    float* weights_ptr = *data + sizeof(Config)/sizeof(float);
+    *data = mmap(NULL, *file_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, *fd, 0);
+    if (*data == MAP_FAILED) { fprintf(stderr, "mmap data failed!\n"); exit(EXIT_FAILURE); }
+    //float* weights_ptr = *data + sizeof(Config)/sizeof(float);
+    *ddata = mmap(NULL, *file_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (*ddata == MAP_FAILED) { printf("mmap ddata failed!\n"); exit(EXIT_FAILURE); }
+    memset(*ddata, 0, *file_size);
+    weights_ptr = *data + sizeof(Config)/sizeof(float);
+    dweights_ptr = *ddata + sizeof(Config)/sizeof(float);    
     memory_map_weights(weights, config, weights_ptr, shared_weights);
+    memory_map_weights(dweights, config, dweights_ptr, shared_weights);
 }
 #endif
 
 void build_transformer(Transformer *t, char* checkpoint_path) {
     // read in the Config and the Weights from the checkpoint
-    read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->fd, &t->data, &t->file_size);
+    read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->dweights, t->weights_ptr, t->dweights_ptr, &t->fd, &t->data, &t->ddata, &t->file_size);
     // allocate the RunState buffers
     malloc_run_state(&t->state, &t->config);
 }
@@ -383,12 +413,13 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
     #endif
 }
 
-float* forward(Transformer* transformer, int token, int pos) {
+//float* forward(Transformer* transformer, int token, int pos) {
+float* forward(int token, int pos, Config *p, TransformerWeights *w, RunState *s) {
 
     // a few convenience variables
-    Config* p = &transformer->config;
-    TransformerWeights* w = &transformer->weights;
-    RunState* s = &transformer->state;
+    //Config* p = &transformer->config;
+    //TransformerWeights* w = &transformer->weights;
+    //RunState* s = &transformer->state;
     float *x = s->x;
     int dim = p->dim;
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
@@ -400,7 +431,6 @@ float* forward(Transformer* transformer, int token, int pos) {
     float* content_row = w->token_embedding_table + token * dim;
     memcpy(x, content_row, dim*sizeof(*x));
 
-    // forward all the layers
     for(unsigned long long l = 0; l < p->n_layers; l++) {
 
         // attention rmsnorm
@@ -866,6 +896,26 @@ int sample(Sampler* sampler, float* logits, float temperature, float topp) {
     return next;
 }
 
+
+// void transformer(int token, int pos, Config* __restrict__ p, RunState* __restrict__ s, TransformerWeights* __restrict__ w) {
+float loss(int token, int pos, Config* __restrict__ config, RunState* __restrict__ s, TransformerWeights* __restrict__ w, int nexttok, float temperature) {
+    //transformer(token, pos, config, s, w);
+    float* logits = forward(token, pos, config, w, s);
+
+    // apply the temperature to the logits
+    for (int q=0; q<config->vocab_size; q++) { s->logits[q] /= temperature; }
+
+    // apply softmax to the logits to get the probabilities for next token
+    //softmax(s->logits, config->vocab_size);
+    softmax(logits, config->vocab_size);
+
+    // we now want to sample from this distribution to get the next token
+    //next = sample(state.logits, config.vocab_size);
+    // https://github.com/keras-team/keras/blob/21c25fd38023a3783950c5577383ffe51a62f650/keras/backend_config.py#L34
+    //return -log(s->logits[nexttok] + 1e-7);
+    return -log(logits[nexttok] + 1e-7);
+}
+
 // ----------------------------------------------------------------------------
 // utilities: time
 
@@ -902,8 +952,22 @@ void error_usage() {
     fprintf(stderr, "  -x <int>    extended info / stats, default 1 = on. 0 = off\n");    
     fprintf(stderr, "  -i <string> input prompt\n");
     fprintf(stderr, "  -z <string> optional path to custom tokenizer\n");
+    fprintf(stderr, "  -e <string> optional path to training data\n");
     exit(EXIT_FAILURE);
 }
+
+int enzyme_const;
+int enzyme_primal_return;
+int enzyme_dup;
+float __enzyme_autodiff(void*, 
+        int,
+        int, int,
+        int, int,
+        int, Config*,
+        int, RunState*, RunState*,
+        int, TransformerWeights*, TransformerWeights*,
+        int,
+        int, float);
 
 int main(int argc, char *argv[]) {
 
@@ -917,6 +981,7 @@ int main(int argc, char *argv[]) {
     char *prompt = NULL;      // prompt string
     int buffertokens = 1;     // output token buffer size
     int stats = 1;     // extended status info
+    char *training_data = "trains.txt";
     
     
     #if defined(COSMO_ZIP) || defined(INC_BIN) || defined(STRLIT) // special case for embedded models
@@ -958,6 +1023,7 @@ int main(int argc, char *argv[]) {
         else if (argv[i][1] == 'x') { stats = atoi(argv[i + 1]); }
         else if (argv[i][1] == 'i') { prompt = argv[i + 1]; }
         else if (argv[i][1] == 'z') { tokenizer_path = argv[i + 1]; }
+        else if (argv[i][1] == 'e') { training_data = argv[i + 1]; } // Enzyme!
         else { error_usage(); }
     }
     #endif
@@ -1002,10 +1068,135 @@ int main(int argc, char *argv[]) {
     puts("Error: Buffer allocation!"); exit(EXIT_FAILURE);
     }
 
+    double alpha = 1.0;
+
+    if(training_data){
+        printf("Training. Yay!\n");
+
+        // read the train.txt file
+        FILE *train_file = fopen(training_data, "r");
+        if (!train_file) {
+            printf("Unable to open train.txt\n");
+            return 1;
+        }
+        fseek(train_file, 0, SEEK_END);
+        long length = ftell(train_file);
+        fseek(train_file, 0, SEEK_SET);
+        char* train_text = malloc(length);
+        if (fread(train_text, 1, length, train_file) != length) {
+            printf("Failed to read train.txt\n");
+            return 1;
+        }
+        fclose(train_file);
+
+        // float* dweightsacc_ptr = calloc(file_size - sizeof(Config)/sizeof(float));
+
+        // greedily match with vocab
+        for (int i = 0; i < length && pos < steps; ) {
+            int maxlen = -1;
+            int maxj = -1;
+
+            for (int j = 0; j < transformer.config.vocab_size; j++) {
+                int len = strlen(tokenizer.vocab[j]);
+                // 
+                if (strncmp(&train_text[i], tokenizer.vocab[j], len) == 0 && len > maxlen) {
+                    maxlen = len;
+                    maxj = j;
+                }
+            }
+            // printf("Matched token %d = '%s' at position %d with length %d\n", maxj, vocab[maxj], i, maxlen);
+
+            i += maxlen;
+
+
+            int nexttok = maxj;
+
+            // transformer(token, pos, &config, &state, &weights);
+
+//float __enzyme_autodiff(void*, 
+//        int,
+//        int, int,
+//        int, int,
+//        int, Config*,
+//        int, RunState*, RunState*,
+//        int, TransformerWeights*, TransformerWeights*,
+//        int,
+//        int, float);
+            double lres =  __enzyme_autodiff((void*)loss,
+                            enzyme_primal_return,
+                            enzyme_const, token,
+                            enzyme_const, pos,
+                            enzyme_const, &transformer.config,
+                            enzyme_dup, &transformer.state, &transformer.dstate, 
+                            enzyme_dup, &transformer.weights, &transformer.dweights,
+                            nexttok,
+                            enzyme_const, temperature);
+
+            printf("%s %d %f\n", tokenizer.vocab[nexttok], pos, lres);
+            fflush(stdout);
+
+            for (size_t i =0, end=(transformer.file_size - sizeof(Config))/sizeof(float); i<end; i++) {
+                if (fabs(transformer.dweights_ptr[i]) > 1000 || isnan(transformer.dweights_ptr[i])) {
+                    printf("%i %f\n", i, transformer.dweights_ptr[i]);
+                    exit(1);
+                }
+                if (fabs(transformer.dweights_ptr[i]) > 1e-2) {
+                    printf("%i %f %d\n", i, transformer.dweights_ptr[i], pos);
+                }
+                transformer.weights_ptr[i] += alpha * transformer.dweights_ptr[i];
+                transformer.dweights_ptr[i] = 0;
+            }
+            zero_run_state(&transformer.dstate, &transformer.config);
+
+            token = maxj;
+            pos++;
+            // break;
+
+        }
+
+        printf("\n\nFinished fine-tuning.\n\n");
+
+        pos = 0;
+        zero_run_state(&transformer.state, &transformer.config);
+        token = 1;
+        printf("<s>\n"); // explicit print the initial BOS token (=1), stylistically symmetric
+    }
+
+    // free_run_state(&state);
+    // malloc_run_state(&state, &config);
+
+    // while (pos < steps) {
+
+    //     transformer(token, pos, &config, &state, &weights);
+    //     // sample the next token
+    //     if(temperature == 0.0f) {
+    //         // greedy argmax sampling
+    //         next = argmax(state.logits, config.vocab_size);
+    //     } else {
+    //         // apply the temperature to the logits
+    //         for (int q=0; q<config.vocab_size; q++) { state.logits[q] /= temperature; }
+    //         // apply softmax to the logits to get the probabilities for next token
+    //         softmax(state.logits, config.vocab_size);
+    //         // we now want to sample from this distribution to get the next token
+    //         next = sample(state.logits, config.vocab_size);
+    //     }
+    //     // printf("%d\n", next);
+    //     printf("%s", vocab[next]);
+    //     fflush(stdout);
+
+    //     token = next;
+    //     pos++;
+
+    // }
+
     while (pos < steps) {
 
         // forward the transformer to get logits for the next token
-        float* logits = forward(&transformer, token, pos);
+        float* logits = forward(token, pos, &transformer.config, &transformer.weights, &transformer.state);
+        //float* logits = forward(&transformer, token, pos);
+    //Config* p = &transformer->config;
+    //TransformerWeights* w = &transformer->weights;
+    //RunState* s = &transformer->state;
 
         // advance the state state machine
         if (pos < num_prompt_tokens) {

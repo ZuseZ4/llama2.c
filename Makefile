@@ -4,7 +4,6 @@ BLIS_PREFIX = /usr/local
 BLIS_INC    = $(BLIS_PREFIX)/include/blis
 BLIS_LIB    = $(BLIS_PREFIX)/lib/libblis.a
 
-
 #OpenBLAS
 OPENBLAS_PREFIX = /usr/include
 OPENBLAS_INC = $(OPENBLAS_PREFIX)/openblas
@@ -20,7 +19,7 @@ TOK_PATH    = tokenizer.bin
 # choose your compiler, e.g. gcc/clang
 # example override to clang: make run CC=clang
 
-CC = gcc
+CC = clang
 
 ##@ Simple Builds
 
@@ -74,11 +73,19 @@ run_cc_clblast: ##		- CLBlast OpenCL CBLAS GPU accelerated build
 
 .PHONY: run_cc_openblas
 run_cc_openblas: ##		- Openblas CBLAS accelerated build
-	$(CC) -D OPENMP -D OPENBLAS -Ofast -fopenmp -march=native -I$(OPENBLAS_INC) run.c -lm -lopenblas -o run
+	$(CC) -D OPENMP -D OPENBLAS -Ofast -march=native -I$(OPENBLAS_INC) run.c -lm -lopenblas -o run
 
 .PHONY: run_cc_cblas
 run_cc_cblas: ##		- Generic CBLAS accelerated build
-	$(CC) -D CBLAS -Ofast -fopenmp -march=native run.c -lm -lcblas -o run
+	$(CC) -D CBLAS -Ofast -march=native run.c -lm -lcblas -o run
+
+.PHONY: run_train
+run_train: ##
+	$(CC) -D OPENBLAS -Ofast -march=native -g -fpass-plugin=/home/zusez4/prog/Enzyme/enzyme/build/Enzyme/ClangEnzyme-14.so run.c -lm -lopenblas -o run
+
+.PHONY: dbg_train
+dbg_train: ##
+	$(CC) -D OPENBLAS -Ofast -march=native -g -fpass-plugin=/home/zusez4/prog/Enzyme/enzyme/buildDbg/Enzyme/ClangEnzyme-14.so run.c -lm -lopenblas -o run
 
 .PHONY: run_cc_blis
 run_cc_blis: ##		- BLIS accelerated build
