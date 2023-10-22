@@ -1070,6 +1070,7 @@ int main(int argc, char *argv[]) {
 
     double alpha = 1.0;
 
+#if AD
     if(training_data){
         printf("Training. Yay!\n");
 
@@ -1161,6 +1162,7 @@ int main(int argc, char *argv[]) {
         token = 1;
         printf("<s>\n"); // explicit print the initial BOS token (=1), stylistically symmetric
     }
+#endif // AD
 
     // free_run_state(&state);
     // malloc_run_state(&state, &config);

@@ -81,11 +81,11 @@ run_cc_cblas: ##		- Generic CBLAS accelerated build
 
 .PHONY: run_train
 run_train: ##
-	$(CC) -D OPENBLAS -Ofast -march=native -g -fpass-plugin=/home/zusez4/prog/Enzyme/enzyme/build/Enzyme/ClangEnzyme-14.so run.c -lm -lopenblas -o run
+	$(CC) -D AD -D CBLAS -Ofast -march=native -g -fpass-plugin=/h/344/drehwald/prog/Enzyme/enzyme/build/Enzyme/ClangEnzyme-16.so run.c -lm -lcblas -o run
 
 .PHONY: dbg_train
 dbg_train: ##
-	$(CC) -D OPENBLAS -Ofast -march=native -g -fpass-plugin=/home/zusez4/prog/Enzyme/enzyme/buildDbg/Enzyme/ClangEnzyme-14.so run.c -lm -lopenblas -o run
+	$(CC) -D AD -D CBLAS -Ofast -march=native -g -fpass-plugin=/h/344/drehwald/prog/Enzyme/enzyme/buildDbg/Enzyme/ClangEnzyme-16.so run.c -lm -lcblas -o run
 
 .PHONY: run_cc_blis
 run_cc_blis: ##		- BLIS accelerated build
