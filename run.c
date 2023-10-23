@@ -1,6 +1,7 @@
 /* Inference for Llama-2 Transformer model in pure C 
    The Llama 2 Everywhere @trholding (Vulcan) fork   */
-   
+  
+#include "assert.h"
 
 #define memcpy __builtin_memcpy
 
@@ -202,6 +203,7 @@ typedef struct {
     float* weights_ptr;
     float* dweights_ptr;
     ssize_t file_size; // size of the checkpoint file in bytes
+    ssize_t dfile_size; // size of the checkpoint train file in bytes
 } Transformer;
 
 void malloc_run_state(RunState* s, Config* p) {
@@ -308,7 +310,7 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
 #else
 void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weights, TransformerWeights* dweights,
 		     float* weights_ptr, float* dweights_ptr,
-                     int* fd, float** data, float** ddata, ssize_t* file_size) {
+                     int* fd, float** data, float** ddata, ssize_t* file_size, ssize_t* dfile_size) {
     FILE *file = fopen(checkpoint, "rb");
     if (!file) { fprintf(stderr, "Couldn't open file %s\n", checkpoint); exit(EXIT_FAILURE); }
     // read in the config header
@@ -325,30 +327,39 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
     if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
     *data = mmap(NULL, *file_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, *fd, 0);
     if (*data == MAP_FAILED) { fprintf(stderr, "mmap data failed!\n"); exit(EXIT_FAILURE); }
-    //float* weights_ptr = *data + sizeof(Config)/sizeof(float);
+    weights_ptr = *data + sizeof(Config)/sizeof(float);
+    memory_map_weights(weights, config, weights_ptr, shared_weights);
+#if AD
     *ddata = mmap(NULL, *file_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (*ddata == MAP_FAILED) { printf("mmap ddata failed!\n"); exit(EXIT_FAILURE); }
     memset(*ddata, 0, *file_size);
-    weights_ptr = *data + sizeof(Config)/sizeof(float);
     dweights_ptr = *ddata + sizeof(Config)/sizeof(float);    
-    memory_map_weights(weights, config, weights_ptr, shared_weights);
     memory_map_weights(dweights, config, dweights_ptr, shared_weights);
+#endif
 }
 #endif
 
 void build_transformer(Transformer *t, char* checkpoint_path) {
     // read in the Config and the Weights from the checkpoint
-    read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->dweights, t->weights_ptr, t->dweights_ptr, &t->fd, &t->data, &t->ddata, &t->file_size);
+    read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->dweights, t->weights_ptr, t->dweights_ptr, &t->fd, &t->data, &t->ddata, &t->file_size, &t->dfile_size);
     // allocate the RunState buffers
     malloc_run_state(&t->state, &t->config);
+    // new, Manuel
+#if AD
+    malloc_run_state(&t->dstate, &t->config);
+#endif
 }
 
 void free_transformer(Transformer* t) {
     // close the memory mapping
     if (t->data != MAP_FAILED) { munmap(t->data, t->file_size); }
+    if (t->ddata != MAP_FAILED) { munmap(t->ddata, t->file_size); }
     if (t->fd != -1) { close(t->fd); }
     // free the RunState buffers
     free_run_state(&t->state);
+#if AD
+    free_run_state(&t->dstate);
+#endif
 }
 
 // ----------------------------------------------------------------------------
@@ -897,23 +908,27 @@ int sample(Sampler* sampler, float* logits, float temperature, float topp) {
 }
 
 
-// void transformer(int token, int pos, Config* __restrict__ p, RunState* __restrict__ s, TransformerWeights* __restrict__ w) {
 float loss(int token, int pos, Config* __restrict__ config, RunState* __restrict__ s, TransformerWeights* __restrict__ w, int nexttok, float temperature) {
-    //transformer(token, pos, config, s, w);
     float* logits = forward(token, pos, config, w, s);
 
     // apply the temperature to the logits
     for (int q=0; q<config->vocab_size; q++) { s->logits[q] /= temperature; }
+    printf("vocab_size: %d\n", config->vocab_size);
 
     // apply softmax to the logits to get the probabilities for next token
     //softmax(s->logits, config->vocab_size);
     softmax(logits, config->vocab_size);
 
+    printf("nexttok: %d\n", nexttok);
+    fflush(stdout);
+
+    assert(nexttok < config->vocab_size);
     // we now want to sample from this distribution to get the next token
     //next = sample(state.logits, config.vocab_size);
     // https://github.com/keras-team/keras/blob/21c25fd38023a3783950c5577383ffe51a62f650/keras/backend_config.py#L34
     //return -log(s->logits[nexttok] + 1e-7);
-    return -log(logits[nexttok] + 1e-7);
+    float tmp = logits[nexttok];
+    return -log(tmp + 1e-7);
 }
 
 // ----------------------------------------------------------------------------
@@ -1082,6 +1097,8 @@ int main(int argc, char *argv[]) {
         }
         fseek(train_file, 0, SEEK_END);
         long length = ftell(train_file);
+        // TODO: Manuel, check this
+        transformer.dfile_size = length;
         fseek(train_file, 0, SEEK_SET);
         char* train_text = malloc(length);
         if (fread(train_text, 1, length, train_file) != length) {
@@ -1111,19 +1128,12 @@ int main(int argc, char *argv[]) {
 
 
             int nexttok = maxj;
+            printf("nexttok: %d\n", nexttok);
+            printf("i: %d\n", i);
 
             // transformer(token, pos, &config, &state, &weights);
 
-//float __enzyme_autodiff(void*, 
-//        int,
-//        int, int,
-//        int, int,
-//        int, Config*,
-//        int, RunState*, RunState*,
-//        int, TransformerWeights*, TransformerWeights*,
-//        int,
-//        int, float);
-            double lres =  __enzyme_autodiff((void*)loss,
+            float lres =  __enzyme_autodiff((void*)loss,
                             enzyme_primal_return,
                             enzyme_const, token,
                             enzyme_const, pos,
@@ -1196,9 +1206,9 @@ int main(int argc, char *argv[]) {
         // forward the transformer to get logits for the next token
         float* logits = forward(token, pos, &transformer.config, &transformer.weights, &transformer.state);
         //float* logits = forward(&transformer, token, pos);
-    //Config* p = &transformer->config;
-    //TransformerWeights* w = &transformer->weights;
-    //RunState* s = &transformer->state;
+        //Config* p = &transformer->config;
+        //TransformerWeights* w = &transformer->weights;
+        //RunState* s = &transformer->state;
 
         // advance the state state machine
         if (pos < num_prompt_tokens) {
