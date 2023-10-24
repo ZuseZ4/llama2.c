@@ -309,7 +309,7 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
 }
 #else
 void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weights, TransformerWeights* dweights,
-		     float* weights_ptr, float* dweights_ptr,
+		     float** weights_ptr, float** const dweights_ptr,
                      int* fd, float** data, float** ddata, ssize_t* file_size, ssize_t* dfile_size) {
     FILE *file = fopen(checkpoint, "rb");
     if (!file) { fprintf(stderr, "Couldn't open file %s\n", checkpoint); exit(EXIT_FAILURE); }
@@ -327,21 +327,21 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
     if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
     *data = mmap(NULL, *file_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, *fd, 0);
     if (*data == MAP_FAILED) { fprintf(stderr, "mmap data failed!\n"); exit(EXIT_FAILURE); }
-    weights_ptr = *data + sizeof(Config)/sizeof(float);
-    memory_map_weights(weights, config, weights_ptr, shared_weights);
+    *weights_ptr = *data + sizeof(Config)/sizeof(float);
+    memory_map_weights(weights, config, *weights_ptr, shared_weights);
 #if AD
     *ddata = mmap(NULL, *file_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (*ddata == MAP_FAILED) { printf("mmap ddata failed!\n"); exit(EXIT_FAILURE); }
     memset(*ddata, 0, *file_size);
-    dweights_ptr = *ddata + sizeof(Config)/sizeof(float);    
-    memory_map_weights(dweights, config, dweights_ptr, shared_weights);
+    *dweights_ptr = *ddata + sizeof(Config)/sizeof(float);    
+    memory_map_weights(dweights, config, *dweights_ptr, shared_weights);
 #endif
 }
 #endif
 
 void build_transformer(Transformer *t, char* checkpoint_path) {
     // read in the Config and the Weights from the checkpoint
-    read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->dweights, t->weights_ptr, t->dweights_ptr, &t->fd, &t->data, &t->ddata, &t->file_size, &t->dfile_size);
+    read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->dweights, &t->weights_ptr, &t->dweights_ptr, &t->fd, &t->data, &t->ddata, &t->file_size, &t->dfile_size);
     // allocate the RunState buffers
     malloc_run_state(&t->state, &t->config);
     // new, Manuel
@@ -403,6 +403,91 @@ void softmax(float* x, int size) {
         x[i] /= sum;
     }
 }
+
+#if 0
+void
+cblas_sgemv (const enum CBLAS_ORDER order, const enum CBLAS_TRANSPOSE TransA,
+             const int M, const int N, const float alpha, const float *A,
+             const int lda, const float *X, const int incX, const float beta,
+             float *Y, const int incY)
+{
+#define BASE float
+{
+#define INDEX int
+#define OFFSET(N, incX) ((incX) > 0 ?  0 : ((N) - 1) * (-(incX)))
+  INDEX i, j;
+  INDEX lenX, lenY;
+
+  const int Trans = (TransA != CblasConjTrans) ? TransA : CblasTrans;
+
+ //  CHECK_ARGS12(GEMV,order,TransA,M,N,alpha,A,lda,X,incX,beta,Y,incY);
+
+  if (M == 0 || N == 0)
+    return;
+
+  if (alpha == 0.0 && beta == 1.0)
+    return;
+
+  if (Trans == CblasNoTrans) {
+    lenX = N;
+    lenY = M;
+  } else {
+    lenX = M;
+    lenY = N;
+  }
+
+  /* form  y := beta*y */
+  if (beta == 0.0) {
+    INDEX iy = OFFSET(lenY, incY);
+    for (i = 0; i < lenY; i++) {
+      Y[iy] = 0.0;
+      iy += incY;
+    }
+  } else if (beta != 1.0) {
+    INDEX iy = OFFSET(lenY, incY);
+    for (i = 0; i < lenY; i++) {
+      Y[iy] *= beta;
+      iy += incY;
+    }
+  }
+
+  if (alpha == 0.0)
+    return;
+
+  if ((order == CblasRowMajor && Trans == CblasNoTrans)
+      || (order == CblasColMajor && Trans == CblasTrans)) {
+    /* form  y := alpha*A*x + y */
+    INDEX iy = OFFSET(lenY, incY);
+    for (i = 0; i < lenY; i++) {
+      BASE temp = 0.0;
+      INDEX ix = OFFSET(lenX, incX);
+      for (j = 0; j < lenX; j++) {
+        temp += X[ix] * A[lda * i + j];
+        ix += incX;
+      }
+      Y[iy] += alpha * temp;
+      iy += incY;
+    }
+  } else if ((order == CblasRowMajor && Trans == CblasTrans)
+             || (order == CblasColMajor && Trans == CblasNoTrans)) {
+    /* form  y := alpha*A'*x + y */
+    INDEX ix = OFFSET(lenX, incX);
+    for (j = 0; j < lenX; j++) {
+      const BASE temp = alpha * X[ix];
+        INDEX iy = OFFSET(lenY, incY);
+        for (i = 0; i < lenY; i++) {
+          Y[iy] += temp * A[lda * j + i];
+          iy += incY;
+        }
+      ix += incX;
+    }
+  } else {
+    printf("unrecognized operation");
+  }
+}
+#undef BASE
+}
+#endif
 
 void matmul(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
@@ -1143,7 +1228,7 @@ int main(int argc, char *argv[]) {
                             nexttok,
                             enzyme_const, temperature);
 
-            printf("%s %d %f\n", tokenizer.vocab[nexttok], pos, lres);
+            printf("%s %d %f\n", nexttok == -1 ? "<INVALID>" : tokenizer.vocab[nexttok], pos, lres);
             fflush(stdout);
 
             for (size_t i =0, end=(transformer.file_size - sizeof(Config))/sizeof(float); i<end; i++) {
