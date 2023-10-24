@@ -365,7 +365,7 @@ void free_transformer(Transformer* t) {
 // ----------------------------------------------------------------------------
 // neural net blocks; the dynamics of the Transformer
 
-void rmsnorm(float* o, float* x, float* weight, int size) {
+static inline void rmsnorm(float* __restrict__ o, float* __restrict__ x, float* __restrict__ weight, int size) {
     // calculate sum of squares
     float ss = 0.0f;
     #ifdef BLAS
@@ -384,7 +384,7 @@ void rmsnorm(float* o, float* x, float* weight, int size) {
     }
 }
 
-void softmax(float* x, int size) {
+static inline void softmax(float* x, int size) {
     // find max value (for numerical stability)
     float max_val = x[0];
     for (int i = 1; i < size; i++) {
@@ -399,9 +399,13 @@ void softmax(float* x, int size) {
         sum += x[i];
     }
     // normalize
+    #ifdef BLAS
+    cblas_sscal(size, 1/sum, x, 1);
+    #else
     for (int i = 0; i < size; i++) {
         x[i] /= sum;
     }
+    #endif
 }
 
 #if 0
@@ -489,7 +493,7 @@ cblas_sgemv (const enum CBLAS_ORDER order, const enum CBLAS_TRANSPOSE TransA,
 }
 #endif
 
-void matmul(float* xout, float* x, float* w, int n, int d) {
+static inline void matmul(float* __restrict__ xout, float* __restrict__ x, float* __restrict__ w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
     #ifdef BLAS
@@ -510,7 +514,8 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
 }
 
 //float* forward(Transformer* transformer, int token, int pos) {
-float* forward(int token, int pos, Config *p, TransformerWeights *w, RunState *s) {
+__attribute__((always_inline))
+static inline float* forward(int token, int pos, Config *__restrict__ p, TransformerWeights *__restrict__ w, RunState *__restrict__ s) {
 
     // a few convenience variables
     //Config* p = &transformer->config;
@@ -577,9 +582,13 @@ float* forward(int token, int pos, Config *p, TransformerWeights *w, RunState *s
                 float* k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
                 // calculate the attention score as the dot product of q and k
                 float score = 0.0f;
+#ifdef BLAS
+                score = cblas_sdot(head_size, q, 1, k, 1);
+#else
                 for (int i = 0; i < head_size; i++) {
                     score += q[i] * k[i];
                 }
+#endif
                 score /= sqrtf(head_size);
                 // save the score to the attention buffer
                 att[t] = score;
@@ -998,16 +1007,16 @@ float loss(int token, int pos, Config* __restrict__ config, RunState* __restrict
 
     // apply the temperature to the logits
     for (int q=0; q<config->vocab_size; q++) { s->logits[q] /= temperature; }
-    printf("vocab_size: %d\n", config->vocab_size);
+    // printf("vocab_size: %d\n", config->vocab_size);
 
     // apply softmax to the logits to get the probabilities for next token
     //softmax(s->logits, config->vocab_size);
     softmax(logits, config->vocab_size);
 
-    printf("nexttok: %d\n", nexttok);
-    fflush(stdout);
+    // printf("nexttok: %d\n", nexttok);
+    // fflush(stdout);
 
-    assert(nexttok < config->vocab_size);
+    // assert(nexttok < config->vocab_size);
     // we now want to sample from this distribution to get the next token
     //next = sample(state.logits, config.vocab_size);
     // https://github.com/keras-team/keras/blob/21c25fd38023a3783950c5577383ffe51a62f650/keras/backend_config.py#L34
@@ -1213,8 +1222,8 @@ int main(int argc, char *argv[]) {
 
 
             int nexttok = maxj;
-            printf("nexttok: %d\n", nexttok);
-            printf("i: %d\n", i);
+            // printf("nexttok: %d\n", nexttok);
+            // printf("i: %d\n", i);
 
             // transformer(token, pos, &config, &state, &weights);
 
@@ -1228,17 +1237,17 @@ int main(int argc, char *argv[]) {
                             nexttok,
                             enzyme_const, temperature);
 
-            printf("%s %d %f\n", nexttok == -1 ? "<INVALID>" : tokenizer.vocab[nexttok], pos, lres);
-            fflush(stdout);
+            // printf("%s %d %f\n", nexttok == -1 ? "<INVALID>" : tokenizer.vocab[nexttok], pos, lres);
+            // fflush(stdout);
 
             for (size_t i =0, end=(transformer.file_size - sizeof(Config))/sizeof(float); i<end; i++) {
-                if (fabs(transformer.dweights_ptr[i]) > 1000 || isnan(transformer.dweights_ptr[i])) {
-                    printf("%i %f\n", i, transformer.dweights_ptr[i]);
-                    exit(1);
-                }
-                if (fabs(transformer.dweights_ptr[i]) > 1e-2) {
-                    printf("%i %f %d\n", i, transformer.dweights_ptr[i], pos);
-                }
+                //if (fabs(transformer.dweights_ptr[i]) > 1000 || isnan(transformer.dweights_ptr[i])) {
+                //    printf("%i %f\n", i, transformer.dweights_ptr[i]);
+                //    exit(1);
+                //}
+                //if (fabs(transformer.dweights_ptr[i]) > 1e-2) {
+                //    printf("%i %f %d\n", i, transformer.dweights_ptr[i], pos);
+                //}
                 transformer.weights_ptr[i] += alpha * transformer.dweights_ptr[i];
                 transformer.dweights_ptr[i] = 0;
             }

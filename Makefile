@@ -85,7 +85,7 @@ run_cc_cblas: ##		- Generic CBLAS accelerated build
 
 .PHONY: run_traino
 run_traino: ##
-	$(CC) -D AD -D OPENBLAS -Ofast -march=native -g -fplugin=$(ENZYME_DIR)/Enzyme/ClangEnzyme-$(ENZYME_VER).so run.c -lm -lopenblas -o run
+	$(CC) -D AD -D OPENBLAS -Ofast -march=native -g -fplugin=$(ENZYME_DIR)/Enzyme/ClangEnzyme-$(ENZYME_VER).so run.c -lm -lopenblas -o run -mllvm -enzyme-print
 
 .PHONY: dbg_traino
 dbg_traino: ##
@@ -93,7 +93,7 @@ dbg_traino: ##
 
 .PHONY: run_train
 run_train: ##
-	$(CC) -D AD -D CBLAS -Ofast -march=native -g -fplugin=$(ENZYME_DIR)/Enzyme/ClangEnzyme-$(ENZYME_VER).so run.c -lm -lcblas -o run
+	$(CC) -D AD -D CBLAS -Ofast -march=native -g -fplugin=$(ENZYME_DIR)/Enzyme/ClangEnzyme-$(ENZYME_VER).so run.c -lm -lcblas -o run 
 
 .PHONY: dbg_train
 dbg_train: ##
