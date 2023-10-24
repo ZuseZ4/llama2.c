@@ -398,6 +398,7 @@ static inline void softmax(float* x, int size) {
         x[i] = expf(x[i] - max_val);
         sum += x[i];
     }
+
     // normalize
     #ifdef BLAS
     cblas_sscal(size, 1/sum, x, 1);
@@ -527,7 +528,7 @@ static inline float* forward(int token, int pos, Config *__restrict__ p, Transfo
     int kv_mul = p->n_heads / p->n_kv_heads; // integer multiplier of the kv sharing in multiquery
     int hidden_dim =  p->hidden_dim;
     int head_size = dim / p->n_heads;
-
+    
     // copy the token embedding into x
     float* content_row = w->token_embedding_table + token * dim;
     memcpy(x, content_row, dim*sizeof(*x));
@@ -1021,7 +1022,7 @@ float loss(int token, int pos, Config* __restrict__ config, RunState* __restrict
     //next = sample(state.logits, config.vocab_size);
     // https://github.com/keras-team/keras/blob/21c25fd38023a3783950c5577383ffe51a62f650/keras/backend_config.py#L34
     //return -log(s->logits[nexttok] + 1e-7);
-    float tmp = logits[nexttok];
+    float tmp = (nexttok == -1) ? 0 : logits[nexttok];
     return -log(tmp + 1e-7);
 }
 
